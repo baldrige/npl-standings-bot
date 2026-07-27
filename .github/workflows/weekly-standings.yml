@@ -39,7 +39,7 @@ jobs:
       fresh: ${{ steps.check.outputs.fresh }}
       page_date: ${{ steps.check.outputs.page_date }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Has Scoresheet posted a new week?
         id: check
@@ -76,7 +76,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: System dependencies and fonts
         run: |
@@ -125,13 +125,24 @@ jobs:
             any::tidyverse
             any::webshot2
 
-      - uses: browser-actions/setup-chrome@v1
+      - uses: browser-actions/setup-chrome@v2
         id: chrome
         with:
           chrome-version: stable
 
+      # Only export the path if it is real. An empty CHROMOTE_CHROME is worse
+      # than an unset one, because chromote would stop autodetecting.
       - name: Point chromote at Chrome
-        run: echo "CHROMOTE_CHROME=${{ steps.chrome.outputs.chrome-path }}" >> "$GITHUB_ENV"
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+        run: |
+          set -euo pipefail
+          if [ -n "${CHROME_PATH:-}" ] && [ -x "$CHROME_PATH" ]; then
+            echo "CHROMOTE_CHROME=$CHROME_PATH" >> "$GITHUB_ENV"
+            echo "Using $CHROME_PATH"
+          else
+            echo "setup-chrome returned no usable path; letting chromote autodetect."
+          fi
 
       - name: Parser regression tests
         run: Rscript tests/test_parser.R
@@ -145,7 +156,7 @@ jobs:
       # Unconditional, so a failed Slack post still leaves you the images.
       - name: Upload images
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: npl-images-${{ needs.gate.outputs.page_date }}
           path: |

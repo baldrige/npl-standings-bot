@@ -135,7 +135,7 @@ unlucky <- standings %>%
   mutate(eL = round(eL, 1)) %>%
   mutate(delta = eW - W) %>%
   arrange(desc(delta)) %>%
-  gt(rowname_col = "Team.x") |>
+  gt() |>
   tab_header(
     title = "Unluckiest Teams in NPL",
     subtitle = paste0("Through Games of ", through)
@@ -180,7 +180,7 @@ wildcard <- standings %>%
   mutate(pW = round(pW, 1)) %>%
   mutate(pL = round(pL, 1)) %>%
   arrange(desc(W)) %>%
-  gt(rowname_col = "Team.x") |>
+  gt() |>
   tab_header(
     title = "NPL Wild Card Standings",
     subtitle = paste0("Through Games of ", through)
@@ -233,7 +233,7 @@ teampitchhit <- standings %>%
   mutate(rERA = min_rank(ERA)) %>%
   arrange(Mascot) %>%
   select(Logo, Team, Mascot, W, L, OPS, rOPS, ERA, rERA) %>%
-  gt(rowname_col = "Team.x") |>
+  gt() |>
   tab_header(
     title = "NPL Team Hitting and Pitching",
     subtitle = paste0("Through Games of ", through)
