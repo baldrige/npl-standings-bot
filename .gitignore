@@ -1,0 +1,8 @@
+# Generated each run: images plus the parsed page date. standings.csv is
+# committed (it is the weekly artifact), but out/ is not.
+out/
+
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata

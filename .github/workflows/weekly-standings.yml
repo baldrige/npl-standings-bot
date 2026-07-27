@@ -1,0 +1,189 @@
+name: NPL weekly standings
+
+on:
+  schedule:
+    # Every 20 minutes across Monday daytime UTC (~7am-6pm ET during EDT).
+    # The freshness gate below is idempotent, so unlike page-monitor.yml this
+    # needs no DST guard: cover a wide window and let the page's own date
+    # decide when to actually fire.
+    - cron: '*/20 11-22 * * 1'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Ignore the freshness gate and run anyway'
+        type: boolean
+        default: false
+      dry_run:
+        description: 'Render images as an artifact, but do not post to Slack or commit'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+# Two gate-passing runs must never both post.
+concurrency:
+  group: npl-weekly
+  cancel-in-progress: false
+
+env:
+  PAGE_URL: https://www.scoresheet.com/FOR_WWW/BL_National_Pastime.htm
+
+jobs:
+  # Deliberately cheap and toolchain-free: this is what makes 20-minute polling
+  # affordable. ~40 no-op runs a week at roughly 20 seconds each.
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      fresh: ${{ steps.check.outputs.fresh }}
+      page_date: ${{ steps.check.outputs.page_date }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Has Scoresheet posted a new week?
+        id: check
+        run: |
+          set -euo pipefail
+          raw=$(curl -sS --max-time 30 \
+                  -A 'Mozilla/5.0 (compatible; NPLStandingsBot/1.0)' \
+                  "$PAGE_URL" | grep -o '<h1>[^<]*</h1>' | head -1)
+          echo "h1: $raw"
+          token=$(printf '%s' "$raw" | grep -oE '[0-9]{1,2}-[0-9]{1,2}-[0-9]{2}' | head -1)
+          if [ -z "$token" ]; then
+            echo "::error::no M-D-YY date found in <h1>: $raw"
+            exit 1
+          fi
+          page_date=$(printf '%s' "$token" \
+            | awk -F- '{printf "20%02d-%02d-%02d\n", $3, $1, $2}')
+          if [ -f state/last_posted.txt ]; then
+            last=$(tr -d '[:space:]' < state/last_posted.txt)
+          else
+            last=""
+          fi
+          echo "page date: $page_date   last posted: ${last:-<none>}"
+          echo "page_date=$page_date" >> "$GITHUB_OUTPUT"
+          if [ "$page_date" = "$last" ]; then
+            echo "Already posted $page_date - nothing to do."
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  report:
+    needs: gate
+    if: needs.gate.outputs.fresh == 'true' || inputs.force
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System dependencies and fonts
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libmagick++-dev libcurl4-openssl-dev libssl-dev libxml2-dev \
+            libfreetype6-dev libpng-dev libjpeg-dev libtiff5-dev \
+            libfontconfig1-dev libharfbuzz-dev libfribidi-dev \
+            fonts-liberation fonts-dejavu-core
+          # gt pulls Source Sans Pro and Libre Franklin from fonts.googleapis.com
+          # at screenshot time, so the tables already match macOS. These local
+          # copies cover the two things that resolve against the OS instead: the
+          # ragg-rendered scatter plot, and gt's system-ui fallback used by the
+          # subtitle and division row-group labels. Note Google now ships the
+          # successor family under the name "Source Sans 3".
+          mkdir -p "$HOME/.local/share/fonts"
+          base=https://raw.githubusercontent.com/google/fonts/main/ofl
+          curl -fsSL -o "$HOME/.local/share/fonts/SourceSans3.ttf" \
+            "$base/sourcesans3/SourceSans3%5Bwght%5D.ttf" || echo "Source Sans 3 unavailable"
+          curl -fsSL -o "$HOME/.local/share/fonts/LibreFranklin.ttf" \
+            "$base/librefranklin/LibreFranklin%5Bwght%5D.ttf" || echo "Libre Franklin unavailable"
+          fc-cache -f
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+
+      # Explicit package list rather than a DESCRIPTION: R/ holds top-level
+      # scripts, not package code, so this repo should not look installable.
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          cache-version: 1
+          packages: |
+            any::chromote
+            any::cropcircles
+            any::ggimage
+            any::ggrepel
+            any::gt
+            any::gtExtras
+            any::httr2
+            any::jsonlite
+            any::lubridate
+            any::ragg
+            any::rvest
+            any::tidyverse
+            any::webshot2
+
+      - uses: browser-actions/setup-chrome@v1
+        id: chrome
+        with:
+          chrome-version: stable
+
+      - name: Point chromote at Chrome
+        run: echo "CHROMOTE_CHROME=${{ steps.chrome.outputs.chrome-path }}" >> "$GITHUB_ENV"
+
+      - name: Parser regression tests
+        run: Rscript tests/test_parser.R
+
+      - name: Scrape standings
+        run: Rscript R/scrape_standings.R
+
+      - name: Render images
+        run: Rscript R/npl_league_stats.R
+
+      # Unconditional, so a failed Slack post still leaves you the images.
+      - name: Upload images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npl-images-${{ needs.gate.outputs.page_date }}
+          path: |
+            out/*.png
+            standings.csv
+          if-no-files-found: warn
+
+      - name: Post to Slack
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ vars.SLACK_CHANNEL_ID }}
+          NPL_DRY_RUN: ${{ inputs.dry_run && 'true' || '' }}
+        run: Rscript R/post_to_slack.R
+
+      # Post first, then record. A failed push therefore risks a duplicate post
+      # next run rather than a silently skipped week - the louder, more
+      # recoverable direction.
+      - name: Commit standings and new state
+        if: ${{ !inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          page_date=$(tr -d '[:space:]' < out/page_date.txt)
+          printf '%s\n' "$page_date" > state/last_posted.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add standings.csv state/last_posted.txt
+          if git diff --staged --quiet; then
+            echo "Nothing to commit."
+            exit 0
+          fi
+          git commit -m "NPL standings through $page_date"
+          for attempt in 1 2 3; do
+            if git pull --rebase --autostash && git push; then
+              echo "Pushed on attempt $attempt."
+              exit 0
+            fi
+            echo "Push attempt $attempt failed; retrying."
+            sleep 5
+          done
+          echo "::error::Could not push state update. The week WAS posted to Slack, so set state/last_posted.txt to $page_date by hand or the next run will re-post it."
+          exit 1
