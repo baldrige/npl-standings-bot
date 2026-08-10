@@ -61,9 +61,18 @@ jobs:
           else
             last=""
           fi
-          echo "page date: $page_date   last posted: ${last:-<none>}"
+          # Scoresheet edits the page mid-week, so "changed" is not the same as
+          # "a new week closed". On 2026-08-10 it briefly read "through 8-6-26",
+          # a Thursday, and a bare inequality check posted that partial week.
+          # The real weekly update always lands on the previous day's date - the
+          # Sunday that closed the week, since this only runs Mondays.
+          expected=$(date -u -d yesterday +%F)
+          echo "page date: $page_date   expected: $expected   last posted: ${last:-<none>}"
           echo "page_date=$page_date" >> "$GITHUB_OUTPUT"
-          if [ "$page_date" = "$last" ]; then
+          if [ "$page_date" != "$expected" ]; then
+            echo "Page reads $page_date, not the week-closing $expected - mid-week edit, ignoring."
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+          elif [ "$page_date" = "$last" ]; then
             echo "Already posted $page_date - nothing to do."
             echo "fresh=false" >> "$GITHUB_OUTPUT"
           else

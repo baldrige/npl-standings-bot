@@ -5,16 +5,18 @@ Replaces the Monday routine of pasting Scoresheet's fixed-width standings into
 
 Every Monday the workflow polls the
 [BL National Pastime summary page](https://www.scoresheet.com/FOR_WWW/BL_National_Pastime.htm),
-waits until the page's own "through" date advances, then scrapes, renders, and
-posts all five images as a single Slack message.
+waits until the page's own "through" date reaches yesterday — the Sunday that
+closed the week — then scrapes, renders, and posts all five images as a single
+Slack message.
 
 ## How it works
 
 ```
 cron (every 20 min, Monday 11:00-22:00 UTC)
-  └─ gate job: curl page -> <h1> date -> compare to state/last_posted.txt
-       ├─ unchanged -> stop (the common case; ~20s, no toolchain installed)
-       └─ newer ↓
+  └─ gate job: curl page -> <h1> date
+       ├─ != yesterday        -> stop (mid-week edit, or the week hasn't closed)
+       ├─ == state/last_posted.txt -> stop (already posted; the common case)
+       └─ both checks pass ↓
           report job:
             tests/test_parser.R      regression tests against a saved fixture
             R/scrape_standings.R  -> standings.csv + out/page_date.txt
@@ -26,6 +28,21 @@ cron (every 20 min, Monday 11:00-22:00 UTC)
 The gate runs before any toolchain is installed, which is what makes 20-minute
 polling affordable. Because it is idempotent, the workflow needs no DST guard —
 it covers a wide UTC window and lets the page's date decide when to fire.
+
+### Why the gate checks the date twice
+
+"The page changed" is not the same as "a new week closed". Scoresheet edits the
+page mid-week: on 2026-08-10 it briefly read `through 8-6-26`, a Thursday, and
+the original inequality-only gate treated that as a new week and posted a
+partial one. So the gate now requires **both**:
+
+- `page_date == yesterday` — the Sunday that closed the week. This rejects
+  mid-week edits. Only Mondays are scheduled, so yesterday is always Sunday.
+- `page_date != last_posted` — preserves idempotency, so that only the first of
+  the ~36 Monday checks posts.
+
+A manual `workflow_dispatch` on any other weekday fails the first check by
+construction; use `force=true` to override it.
 
 ## Layout
 
